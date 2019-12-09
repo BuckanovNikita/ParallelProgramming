@@ -48,6 +48,21 @@ void rowOperations(const shared_ptr< double[]>& a, const shared_ptr<double []>& 
     }
 }
 
+void ownerOperations(const shared_ptr<shared_ptr< double[]>[]>& matrix, const shared_ptr < omp_lock_t[] >& rowReadLock,
+                     int startIdx, int endIdx,const shared_ptr<int[]>& maxValues, int mSize)
+{
+    maxValues[startIdx] = getVectorMax(matrix[startIdx], mSize);
+    omp_unset_lock(&rowReadLock[startIdx]);
+    for(int i=startIdx + 1; i < endIdx; i++)
+    {
+        for(int j = startIdx; j<i; j++) {
+            rowOperations(matrix[i], matrix[j], maxValues[j], mSize);
+        }
+        maxValues[i] = getVectorMax(matrix[i], mSize);
+        omp_unset_lock(&rowReadLock[i]);
+    }
+}
+
 
 int main(int argc, char* argv[]) {
 
@@ -94,38 +109,33 @@ int main(int argc, char* argv[]) {
     }
 
     shared_ptr < pair < shared_ptr < double[] > , int >[]> readStorage(new pair<shared_ptr<double[] >, int > [mSize]);
+
     shared_ptr<int[]> maxValues(new int [mSize]);
 
     auto startTime = chrono::high_resolution_clock::now();
     countThreads = 4;
-    //1 threads 54.5
-    //8 threads 39.97
-    //8 threads with max_optimization 39.35
-    #pragma omp parallel num_threads(countThreads) shared (rowReadLock, matrix, readStorage)
+#pragma omp parallel num_threads(countThreads) //shared (rowReadLock, matrix, readStorage)
     {
         int threadIdx = omp_get_thread_num();
 
         for (int i = 0; i < mSize; i++) {
 
+            int maxIdx = getVectorMax(matrix[i], mSize);
             if (isOwner(i, threadIdx, countThreads, mSize)) {
-                maxValues[i] = getVectorMax(matrix[i], mSize);
-                //for(int j = lowBound(threadIdx, countThreads, mSize); j<i; j++)
-                //{
-                 //   rowOperations(matrix[i], matrix[j], maxValues[j], mSize);
-                //}
-                omp_unset_lock(&rowReadLock[i]);
-               // continue;
+                ownerOperations(matrix, rowReadLock,
+                                lowBound(threadIdx, countThreads, mSize),
+                                upperBound(threadIdx, countThreads, mSize), maxValues, mSize);
+                break;
             }
-            cout << omp_test_lock(&rowReadLock[i]) << endl;
-            omp_set_lock(&rowReadLock[i]);
 
+            omp_set_lock(&rowReadLock[i]);
             omp_unset_lock(&rowReadLock[i]);
 
             for (int rowIdx = max(lowBound(threadIdx, countThreads, mSize), i + 1);
-                                rowIdx < upperBound(threadIdx, countThreads, mSize); rowIdx++) {
-                    rowOperations(matrix[rowIdx], matrix[i], maxValues[i], mSize+1);
-                    if (i + 1 == rowIdx)
-                        omp_unset_lock(&rowReadLock[i+1]);
+                 rowIdx < upperBound(threadIdx, countThreads, mSize); rowIdx++) {
+                rowOperations(matrix[rowIdx], matrix[i], maxValues[i], mSize+1);
+                if (i + 1 == rowIdx)
+                    omp_unset_lock(&rowReadLock[i+1]);
             }
 
         }
@@ -139,8 +149,8 @@ int main(int argc, char* argv[]) {
         int maxIdx = getVectorMax(matrix[i], mSize);
         for(int j = 0; j<mSize; j++)
             matrix[i][mSize] = matrix[i][mSize] - answer[j] * matrix[i][j];
-        answer[maxValues[i]] = matrix[i][mSize] / matrix[i][maxIdx];
-        maxDelta = max(maxDelta, abs(answer[maxValues[i]] - x[maxValues[i]]));
+        answer[maxIdx] = matrix[i][mSize] / matrix[i][maxIdx];
+        maxDelta = max(maxDelta, abs(answer[maxIdx] - x[maxIdx]));
     }
     auto endTime = chrono::high_resolution_clock::now();
     cout <<"Погрешность вычислений " << maxDelta <<endl;
