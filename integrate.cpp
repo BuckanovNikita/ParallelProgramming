@@ -12,7 +12,7 @@ inline double intFunction(const double x)
     return sqrt(1 - x*x);
 }
 
-inline double gridPoint(const int i, const int N)
+inline double gridPoint(const long long i, const long long N)
 {
     return (double)i/N;
 }
@@ -26,7 +26,7 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    int gridSize =  atoi(argv[1]);
+    long long gridSize =  atol(argv[1]);
     int countThreads = atoi(argv[2]);
     if (gridSize < 1 || countThreads < 1)
     {
@@ -35,17 +35,16 @@ int main(int argc, char* argv[]) {
 
     double sum = 0;
 
-    omp_set_num_threads(countThreads);
     auto startTime = chrono::high_resolution_clock::now();
-#pragma omp parallel for reduction(+:sum)
-    for(int i=0; i<gridSize; i++) {
-        {
-            cout << omp_get_thread_num() << " " <<  i << endl;
-            cout.flush();
-#pragma omp atomic
-            sum += intFunction(gridPoint(i, gridSize))*gridPoint(1, gridSize);
-        };
 
+    countThreads = 1;
+    gridSize = (long long)1e10;
+    cout << gridSize <<endl;
+
+    omp_set_num_threads(countThreads);
+    #pragma omp parallel for reduction(+:sum)
+    for(long long i=0; i<gridSize; i++) {
+        sum += intFunction(gridPoint(i, gridSize))*gridPoint(1, gridSize);
     }
     auto endTime = chrono::high_resolution_clock::now();
     chrono::duration<double> execTime = chrono::duration_cast<chrono::duration<double>>(endTime - startTime);

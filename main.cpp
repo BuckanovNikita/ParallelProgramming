@@ -6,6 +6,8 @@
 #include <fstream>
 #include <vector>
 #include <memory>
+#include <queue>
+#include <unistd.h>
 
 using namespace std;
 
@@ -20,23 +22,6 @@ int getVectorMax(const shared_ptr<double[]>& vec, const int mSize)
             res = vec[i];
         }
     return idx;
-}
-
-int lowBound(const int threadIdx, const int threadPoolSize, const int mSize)
-{
-    return mSize/threadPoolSize * threadIdx;
-}
-
-int upperBound(const int threadIdx, const int threadPoolSize, const int mSize)
-{
-    if (threadIdx + 1 == threadPoolSize)
-        return mSize;
-    return mSize/threadPoolSize * (threadIdx + 1);
-}
-
-bool isOwner(const int rowIdx, const int threadIdx, const int threadPoolSize, const int mSize)
-{
-    return ( (lowBound(threadIdx, threadPoolSize, mSize) <= rowIdx)  && (rowIdx < upperBound(threadIdx, threadPoolSize, mSize)) );
 }
 
 void rowOperations(const shared_ptr< double[]>& a, const shared_ptr<double []>& b, const int maxIdx, const int mSize)
@@ -69,8 +54,6 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-
-    //vector<vector<double>> matrix(mSize);
     shared_ptr < shared_ptr<double[]>[] > matrix(new shared_ptr<double[]>[mSize]);
     vector<double> x(mSize);
 
@@ -90,44 +73,78 @@ int main(int argc, char* argv[]) {
     shared_ptr < omp_lock_t[] > rowReadLock(new omp_lock_t[mSize]);
     for (int i = 0; i < mSize; i++) {
         omp_init_lock(&rowReadLock[i]);
-        omp_set_lock(&rowReadLock[i]);
     }
 
     shared_ptr < pair < shared_ptr < double[] > , int >[]> readStorage(new pair<shared_ptr<double[] >, int > [mSize]);
-    shared_ptr<int[]> maxValues(new int [mSize]);
 
     auto startTime = chrono::high_resolution_clock::now();
-    countThreads = 4;
-    //1 threads 54.5
-    //8 threads 39.97
-    //8 threads with max_optimization 39.35
-    #pragma omp parallel num_threads(countThreads) shared (rowReadLock, matrix, readStorage)
+
+    queue<int> tasks;
+    tasks.push(0);
+    int started = 0;
+    int completed = 0;
+
+    countThreads = 8;
+    #pragma omp parallel num_threads(countThreads)
     {
-        int threadIdx = omp_get_thread_num();
+        int workRow = -1;
+        while (true)
+        {
+            bool out = false;
+            #pragma omp critical
+            {
+                if ( !tasks.empty() ) {
+                    workRow = tasks.front();
+                    omp_set_lock(&rowReadLock[workRow]);
+                    tasks.pop();
+                    started++;
+                } else if (completed == mSize) {
+                    out = true;
+                } else {
+                    workRow = -1;
+                }
+            };
+            if (out) {
+                break;
+            }
+            if(workRow == -1) {
+                usleep(10);
+                continue;
+            }
 
-        for (int i = 0; i < mSize; i++) {
+            int maxIdx = getVectorMax(matrix[workRow], mSize);
 
-            if (isOwner(i, threadIdx, countThreads, mSize)) {
-                maxValues[i] = getVectorMax(matrix[i], mSize);
-                //for(int j = lowBound(threadIdx, countThreads, mSize); j<i; j++)
-                //{
-                 //   rowOperations(matrix[i], matrix[j], maxValues[j], mSize);
-                //}
+            if (workRow + 1 < mSize)
+            {
+                int i = workRow + 1;
+                omp_set_lock(&rowReadLock[i]);
+                rowOperations(matrix[i], matrix[workRow], maxIdx, mSize + 1);
                 omp_unset_lock(&rowReadLock[i]);
-               // continue;
-            }
-            cout << omp_test_lock(&rowReadLock[i]) << endl;
-            omp_set_lock(&rowReadLock[i]);
-
-            omp_unset_lock(&rowReadLock[i]);
-
-            for (int rowIdx = max(lowBound(threadIdx, countThreads, mSize), i + 1);
-                                rowIdx < upperBound(threadIdx, countThreads, mSize); rowIdx++) {
-                    rowOperations(matrix[rowIdx], matrix[i], maxValues[i], mSize+1);
-                    if (i + 1 == rowIdx)
-                        omp_unset_lock(&rowReadLock[i+1]);
+                if (i == workRow + 1)
+                    tasks.push(i);
             }
 
+            queue<int> localTasks;
+            for (int i = workRow + 2; i < mSize; i++)
+            {
+                if ( omp_test_lock(&rowReadLock[i]) )
+                {
+                    rowOperations(matrix[i], matrix[workRow], maxIdx, mSize + 1);
+                    omp_unset_lock(&rowReadLock[i]);
+                }
+            }
+
+            while (!localTasks.empty())
+            {
+                int i = localTasks.front();
+                localTasks.pop();
+                omp_set_lock(&rowReadLock[i]);
+                rowOperations(matrix[i], matrix[workRow], maxIdx, mSize + 1);
+                omp_unset_lock(&rowReadLock[i]);
+            }
+
+            #pragma omp atomic
+            completed++;
         }
     }
     cout << setprecision(4) << endl;
@@ -139,11 +156,13 @@ int main(int argc, char* argv[]) {
         int maxIdx = getVectorMax(matrix[i], mSize);
         for(int j = 0; j<mSize; j++)
             matrix[i][mSize] = matrix[i][mSize] - answer[j] * matrix[i][j];
-        answer[maxValues[i]] = matrix[i][mSize] / matrix[i][maxIdx];
-        maxDelta = max(maxDelta, abs(answer[maxValues[i]] - x[maxValues[i]]));
+        answer[maxIdx] = matrix[i][mSize] / matrix[i][maxIdx];
+        maxDelta = max(maxDelta, abs(answer[maxIdx] - x[maxIdx]));
     }
     auto endTime = chrono::high_resolution_clock::now();
     cout <<"Погрешность вычислений " << maxDelta <<endl;
-    cout <<"Время выполнения " << chrono::duration_cast<chrono::duration<double>>(endTime - startTime).count() <<endl ;
+    cout <<"Время выполнения " << chrono::duration_cast<chrono::duration<double>>(endTime - startTime).count() << endl;
+    //fstream statFile("gauss_stat.txt", ios::out | ios::app);
+    //statFile << countThreads << "," <<  chrono::duration_cast<chrono::duration<double>>(endTime - startTime).count() <<endl;
     return 0;
 }
